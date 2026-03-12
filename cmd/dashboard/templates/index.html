@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BlockDrive Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1, h2 { color: #333; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+        th { background-color: #f8f8f8; }
+        .status-alive { color: green; font-weight: bold; }
+        .status-dead { color: red; font-weight: bold; }
+        .role-leader { background-color: #e6fffa; color: #00796b; padding: 2px 6px; border-radius: 4px; }
+        .role-follower { background-color: #f0f4f8; color: #486581; padding: 2px 6px; border-radius: 4px; }
+        .btn { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        .btn:hover { background-color: #0056b3; }
+        code { background: #eee; padding: 2px 4px; border-radius: 3px; }
+        .log-entry { font-family: monospace; font-size: 0.9em; padding: 5px 0; border-bottom: 1px solid #eee; }
+    </style>
+</head>
+<body>
+    <h1>BlockDrive Monitoring Dashboard</h1>
+    <p>Last Updated: {{.Timestamp}} <a href="/" style="margin-left: 10px;">Refresh</a></p>
+
+    <div class="grid">
+        <!-- Node Status -->
+        <div class="card">
+            <h2>Cluster Nodes</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Node ID</th>
+                        <th>Address</th>
+                        <th>State</th>
+                        <th>Block Height</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Nodes}}
+                    <tr>
+                        <td>{{.ID}}</td>
+                        <td>{{.Address}}</td>
+                        <td>
+                            {{if eq .State "LEADER"}}
+                                <span class="role-leader">LEADER</span>
+                            {{else}}
+                                <span class="role-follower">{{.State}}</span>
+                            {{end}}
+                        </td>
+                        <td>{{.BlockHeight}}</td>
+                        <td>
+                            {{if .IsAlive}}
+                                <span class="status-alive">Online</span>
+                            {{else}}
+                                <span class="status-dead">Offline ({{.Error}})</span>
+                            {{end}}
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Upload File -->
+        <div class="card">
+            <h2>Upload File</h2>
+            <p>Upload a file to the distributed storage network.</p>
+            <form action="/upload" method="POST" enctype="multipart/form-data">
+                <input type="file" name="file" required style="margin-bottom: 10px; display: block;">
+                <button type="submit" class="btn">Upload to Cluster</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Blockchain Audit Log -->
+    <div class="card">
+        <h2>Blockchain Audit Log</h2>
+        <p>The immutable ledger recording every operation in the system.</p>
+        <div style="max-height: 500px; overflow-y: auto;">
+            {{if .Ledger}}
+                {{range .Ledger}}
+                <div class="log-entry">
+                    <strong>Block {{.index}}</strong> | Hash: <code>{{.hash}}</code> | Prev: <code>{{.previous_hash}}</code>
+                    <ul style="margin: 5px 0 15px 20px; padding: 0;">
+                    {{range .operations}}
+                        <li>
+                            <span style="color: #666;">[{{.timestamp}}]</span>
+                            <strong>{{.type}}</strong> by {{.node_id}}
+                            <br>
+                            <small>Data: {{.data}}</small>
+                        </li>
+                    {{end}}
+                    </ul>
+                </div>
+                {{end}}
+            {{else}}
+                <p><em>No ledger data available or cluster is offline.</em></p>
+            {{end}}
+        </div>
+    </div>
+
+</body>
+</html>

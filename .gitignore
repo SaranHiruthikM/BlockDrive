@@ -1,0 +1,16 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Data
+data/
+*.log
+
+# Editor
+.vscode/
+.idea/
+
+# Go
+go.sum
