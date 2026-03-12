@@ -33,11 +33,12 @@ const (
 )
 
 type Node struct {
-	ID       string
-	Address  string
-	Peers    []string // Addresses of other nodes
-	State    NodeState
-	LeaderID string
+	ID          string
+	Address     string   // The public address other nodes should use to contact this node
+	BindAddress string   // The local address to bind the HTTP server to (e.g., :8080)
+	Peers       []string // Addresses of other nodes
+	State       NodeState
+	LeaderID    string
 
 	Store *storage.Store
 	Chain *blockchain.Chain
@@ -55,10 +56,11 @@ type Node struct {
 	stopChan chan struct{}
 }
 
-func NewNode(id, address string, peers []string, storageDir, chainPath string) *Node {
+func NewNode(id, address, bindAddress string, peers []string, storageDir, chainPath string) *Node {
 	return &Node{
 		ID:            id,
 		Address:       address,
+		BindAddress:   bindAddress,
 		Peers:         peers,
 		State:         Follower,
 		Store:         storage.NewStore(storageDir),
@@ -81,20 +83,22 @@ func (n *Node) Start() {
 	mux.HandleFunc("/ledger", n.handleLedger)
 	mux.HandleFunc("/status", n.handleStatus)
 	mux.HandleFunc("/download", n.handleDownload)
-	mux.HandleFunc("/chunk", n.handleGetChunk) // New handler for peer-to-peer chunk retrieval
+	mux.HandleFunc("/chunk", n.handleGetChunk)     // New handler for peer-to-peer chunk retrieval
+	mux.HandleFunc("/block/new", n.handleNewBlock) // Add handler for new block synchronization
+	mux.HandleFunc("/", n.handleIndex)             // Simple UI for the node
 
 	// Ricart-Agrawala Mutex Handlers
-	mux.HandleFunc("/cleanup/start", n.handleCleanupStart)
+	mux.HandleFunc("/backup/start", n.handleBackupStart)
 	mux.HandleFunc("/mutex/request", n.handleMutexRequest)
 	mux.HandleFunc("/mutex/reply", n.handleMutexReply)
 
 	server := &http.Server{
-		Addr:    n.Address,
+		Addr:    n.BindAddress,
 		Handler: mux,
 	}
 
 	go func() {
-		fmt.Printf("Node %s listening on %s\n", n.ID, n.Address)
+		fmt.Printf("Node %s listening on %s (advertised as %s)\n", n.ID, n.BindAddress, n.Address)
 		if err := server.ListenAndServe(); err != nil {
 			fmt.Printf("Error starting server: %v\n", err)
 		}
@@ -204,7 +208,8 @@ func (n *Node) handleUpload(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("Error saving chunk %d: %v\n", i, err)
 			continue
 		}
-		chunkLocs[i] = append(chunkLocs[i], n.ID)
+		// Use Address instead of ID so other nodes know how to reach us directly
+		chunkLocs[i] = append(chunkLocs[i], n.Address)
 
 		// Sharding V1: Round-Robin Distribution
 		// Instead of replicating to ALL peers, we distribute chunks across peers.
@@ -241,11 +246,50 @@ func (n *Node) handleUpload(w http.ResponseWriter, r *http.Request) {
 		// Forward to leader (not implemented yet, just log)
 		fmt.Printf("I am not leader. Should forward to %s\n", n.LeaderID)
 		// Fallback: Add to local chain anyway for demo purpose so client sees it
-		n.Chain.AddBlock([]models.Operation{op})
+		newBlock := n.Chain.AddBlock([]models.Operation{op})
+		// Broadcast the new block to all peers to ensure ledger consistency
+		go n.broadcastBlock(newBlock)
 	}
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(fmt.Sprintf("File %s uploaded successfully. ID: %s", handler.Filename, fileID)))
+}
+
+func (n *Node) broadcastBlock(block models.Block) {
+	data, _ := json.Marshal(block)
+	for _, peer := range n.Peers {
+		go func(addr string) {
+			url := fmt.Sprintf("http://%s/block/new", addr)
+			resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
+			if err != nil {
+				fmt.Printf("Failed to broadcast block to %s: %v\n", addr, err)
+			} else {
+				defer resp.Body.Close()
+			}
+		}(peer)
+	}
+}
+
+func (n *Node) handleNewBlock(w http.ResponseWriter, r *http.Request) {
+	var block models.Block
+	if err := json.NewDecoder(r.Body).Decode(&block); err != nil {
+		http.Error(w, "Invalid block", http.StatusBadRequest)
+		return
+	}
+
+	n.mu.Lock()
+	// Simply append if index is higher
+	// In a real system, we'd validate hash, previous hash, PoW, etc.
+	lastBlock := n.Chain.Blocks[len(n.Chain.Blocks)-1]
+	if block.Index > lastBlock.Index {
+		// Append locally
+		n.Chain.Blocks = append(n.Chain.Blocks, block)
+		n.Chain.Save() // Persist to disk
+		fmt.Printf(" [Ledger] Synced new block %d from peer\n", block.Index)
+	}
+	n.mu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func simpleEncrypt(data []byte, key string) []byte {
@@ -316,6 +360,88 @@ func (n *Node) handleLedger(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
+// handleIndex serves a simple HTML page listing files in the ledger
+func (n *Node) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	n.mu.Lock()
+	blocks := n.Chain.Blocks
+	n.mu.Unlock()
+
+	// Extract unique files
+	type FileInfo struct {
+		ID   string
+		Name string
+		Size int64
+	}
+	files := make(map[string]FileInfo)
+
+	for _, block := range blocks {
+		for _, op := range block.Operations {
+			if op.Type == "UPLOAD" {
+				// Hacky JSON conversion
+				dataBytes, _ := json.Marshal(op.Data)
+				var m models.FileMetadata
+				if err := json.Unmarshal(dataBytes, &m); err == nil {
+					files[m.ID] = FileInfo{ID: m.ID, Name: m.Name, Size: m.Size}
+				}
+			}
+		}
+	}
+
+	// Simple HTML template
+	html := `<!DOCTYPE html>
+<html>
+<head>
+	<title>BlockDrive Node ` + n.ID + `</title>
+	<style>
+		body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+		table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+		th, td { padding: 0.5rem; text-align: left; border-bottom: 1px solid #ddd; }
+		th { background: #f4f4f4; }
+		.btn { display: inline-block; padding: 0.5rem 1rem; background: #007bff; color: white; text-decoration: none; border-radius: 4px; }
+		.btn:hover { background: #0056b3; }
+	</style>
+</head>
+<body>
+	<h1>BlockDrive Node: ` + n.ID + `</h1>
+	<p>Address: ` + n.Address + `</p>
+	<p>Peers: ` + fmt.Sprintf("%v", n.Peers) + `</p>
+	
+	<h2>Start Tasks</h2>
+	<p><a href="/backup/start" target="_blank" class="btn" style="background-color: #d63384;">Start Cluster Backup (Requires Lock)</a></p>
+
+	<h2>Available Files (from Ledger)</h2>
+	<table>
+		<tr>
+			<th>File Name</th>
+			<th>Size (bytes)</th>
+			<th>ID</th>
+			<th>Action</th>
+		</tr>`
+
+	for _, f := range files {
+		html += fmt.Sprintf(`
+		<tr>
+			<td>%s</td>
+			<td>%d</td>
+			<td>%s</td>
+			<td><a href="/download?id=%s" class="btn">Download</a></td>
+		</tr>`, f.Name, f.Size, f.ID, f.ID)
+	}
+
+	html += `
+	</table>
+</body>
+</html>`
+
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(html))
+}
+
 // handleDownload retrieves a file by ID
 func (n *Node) handleDownload(w http.ResponseWriter, r *http.Request) {
 	fileID := r.URL.Query().Get("id")
@@ -369,8 +495,14 @@ func (n *Node) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if chunkData == nil {
-			// Try fetching from peers
-			chunkData, err = n.fetchChunkFromPeers(fileID, i, n.Peers)
+			// Smart Retrieval: Use the blockchain metadata to find EXACTLY who has the chunk
+			// This works even if the uploader is offline or not a direct peer!
+			potentialSources := meta.Locations[i]
+
+			// Fallback: Add our direct peers just in case
+			potentialSources = append(potentialSources, n.Peers...)
+
+			chunkData, err = n.fetchChunkFromPeers(fileID, i, potentialSources)
 		}
 
 		if err != nil || chunkData == nil {
@@ -436,11 +568,17 @@ func (n *Node) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // --- Ricart-Agrawala Mutual Exclusion ---
 
-func (n *Node) handleCleanupStart(w http.ResponseWriter, r *http.Request) {
+// Justification:
+// We use Ricart-Agrawala to implement a "Distributed Cluster Backup".
+// Taking a consistent snapshot of the distributed ledger and storage requires
+// exclusive access to ensure no concurrent modifications corrupt the snapshot state.
+// Only ONE node is allowed to perform the backup process at a time.
+
+func (n *Node) handleBackupStart(w http.ResponseWriter, r *http.Request) {
 	n.mu.Lock()
 	if n.MutexState != Released {
 		n.mu.Unlock()
-		http.Error(w, "Already in critical section or requesting", http.StatusConflict)
+		http.Error(w, "Cluster backup already in progress or queued", http.StatusConflict)
 		return
 	}
 
@@ -453,7 +591,7 @@ func (n *Node) handleCleanupStart(w http.ResponseWriter, r *http.Request) {
 	requiredReplies := len(peers)
 	n.mu.Unlock()
 
-	fmt.Printf("[Mutex] Starting Request. Timestamp: %d. Peers: %d\n", n.MutexTimestamp, requiredReplies)
+	fmt.Printf("[Mutex] Requesting Global Lock for Backup. Timestamp: %d. Peers: %d\n", n.MutexTimestamp, requiredReplies)
 
 	if requiredReplies == 0 {
 		n.enterCriticalSection()
@@ -467,7 +605,7 @@ func (n *Node) handleCleanupStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("Requesting access check logs."))
+	w.Write([]byte("Requesting global lock for backup..."))
 }
 
 func (n *Node) sendMutexRequest(peer string) {
@@ -541,32 +679,36 @@ func (n *Node) enterCriticalSection() {
 	n.MutexState = Held
 	n.mu.Unlock()
 
-	fmt.Println("!!! ENTERING CRITICAL SECTION !!!")
-	fmt.Println(" performing system-wide consistency check...")
+	fmt.Println("!!! ENTERING CRITICAL SECTION (Global Lock Acquired) !!!")
+	fmt.Println(" Performing Cluster-Wide Backup Snapshot...")
+	fmt.Println(" [LOCK] All other write operations are logically suspended.")
 
-	// Simulate work
+	// Simulate heavy backup work
 	go func() {
-		time.Sleep(5 * time.Second)
+		time.Sleep(5 * time.Second) // Simulating backup time
 
-		// Add Audit Record to Chain
+		// Add "BACKUP_COMPLETE" Record to Chain
 		op := models.Operation{
-			Type:      "AUDIT_LOG",
-			Data:      "Consistency Check Passed",
+			Type:      "SYSTEM_BACKUP",
+			Data:      "Snapshot ID: " + fmt.Sprintf("%x", time.Now().Unix()),
 			Timestamp: time.Now().Unix(),
 			NodeID:    n.ID,
 		}
 
 		n.mu.Lock()
-		n.Chain.AddBlock([]models.Operation{op})
+		newBlock := n.Chain.AddBlock([]models.Operation{op})
 		n.mu.Unlock()
-		fmt.Println(" Audit log added.")
+
+		go n.broadcastBlock(newBlock)
+
+		fmt.Println(" Backup completed. Log added to blockchain.")
 
 		n.exitCriticalSection()
 	}()
 }
 
 func (n *Node) exitCriticalSection() {
-	fmt.Println("!!! EXITING CRITICAL SECTION !!!")
+	fmt.Println("!!! EXITING CRITICAL SECTION (Global Lock Released) !!!")
 
 	n.mu.Lock()
 	n.MutexState = Released

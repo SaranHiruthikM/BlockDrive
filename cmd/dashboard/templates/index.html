@@ -71,6 +71,16 @@
             <h2>Upload File</h2>
             <p>Upload a file to the distributed storage network.</p>
             <form action="/upload" method="POST" enctype="multipart/form-data">
+                <div style="margin-bottom: 10px;">
+                    <label for="node">Select Entry Node:</label>
+                    <select name="node" id="node" style="padding: 8px; border-radius: 4px; border: 1px solid #ddd; width: 100%;">
+                        {{range .Nodes}}
+                            <option value="{{.Address}}" {{if not .IsAlive}}disabled{{end}}>
+                                {{.ID}} ({{.Address}}) {{if not .IsAlive}}- OFFLINE{{end}}{{if eq .State "LEADER"}} - LEADER{{end}}
+                            </option>
+                        {{end}}
+                    </select>
+                </div>
                 <input type="file" name="file" required style="margin-bottom: 10px; display: block;">
                 <button type="submit" class="btn">Upload to Cluster</button>
             </form>

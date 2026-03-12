@@ -166,10 +166,14 @@ func handleProxyUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 2. Determine target node (LEADER preferably)
-	targetAddr := nodesAddr[0] // Default to first
-	// Try to find a leader from cache or quick scan?
-	// For now, just pick first alive one or random.
+	// 2. Determine target node
+	targetAddr := r.FormValue("node")
+	if targetAddr == "" {
+		// Fallback to first available
+		if len(nodesAddr) > 0 {
+			targetAddr = nodesAddr[0]
+		}
+	}
 
 	// 3. Prepare multipart forward
 	// Streaming logic needs pipe
