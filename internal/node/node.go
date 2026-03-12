@@ -124,11 +124,12 @@ func (n *Node) checkLeaderStatus() {
 }
 
 func (n *Node) sendHeartbeat(peerAddr string) {
+	fmt.Printf("Sending heartbeat to %s\n", peerAddr)
 	// Fire and forget
 	client := http.Client{Timeout: 1 * time.Second}
 	_, err := client.Post("http://"+peerAddr+"/heartbeat", "application/json", nil)
 	if err != nil {
-		// Log.Printf("Failed to heartbeat %s: %v", peerAddr, err)
+		fmt.Printf("Failed to heartbeat %s: %v\n", peerAddr, err)
 	}
 }
 
@@ -266,6 +267,7 @@ func (n *Node) handleReplicate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (n *Node) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Received heartbeat")
 	n.mu.Lock()
 	n.LastHeartbeat = time.Now()
 	// Optionally update leader ID from payload if provided
