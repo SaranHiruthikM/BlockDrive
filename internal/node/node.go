@@ -23,6 +23,15 @@ const (
 	Leader    NodeState = "LEADER"
 )
 
+// MutexState represents the state of the node in Ricart-Agrawala algorithm
+type MutexState string
+
+const (
+	Released MutexState = "RELEASED"
+	Wanted   MutexState = "WANTED"
+	Held     MutexState = "HELD"
+)
+
 type Node struct {
 	ID       string
 	Address  string
@@ -35,6 +44,12 @@ type Node struct {
 	Clock *lamport.Clock
 
 	LastHeartbeat time.Time
+
+	// Ricart-Agrawala Mutex State
+	MutexState     MutexState
+	MutexTimestamp int64
+	MutexReplies   int
+	MutexDeferred  []string // List of addresses (deferred replies)
 
 	mu       sync.Mutex
 	stopChan chan struct{}
@@ -50,6 +65,8 @@ func NewNode(id, address string, peers []string, storageDir, chainPath string) *
 		Chain:         blockchain.NewChain(chainPath),
 		Clock:         lamport.NewClock(),
 		LastHeartbeat: time.Now(),
+		MutexState:    Released,
+		MutexDeferred: make([]string, 0),
 		stopChan:      make(chan struct{}),
 	}
 }
@@ -65,6 +82,11 @@ func (n *Node) Start() {
 	mux.HandleFunc("/status", n.handleStatus)
 	mux.HandleFunc("/download", n.handleDownload)
 	mux.HandleFunc("/chunk", n.handleGetChunk) // New handler for peer-to-peer chunk retrieval
+
+	// Ricart-Agrawala Mutex Handlers
+	mux.HandleFunc("/cleanup/start", n.handleCleanupStart)
+	mux.HandleFunc("/mutex/request", n.handleMutexRequest)
+	mux.HandleFunc("/mutex/reply", n.handleMutexReply)
 
 	server := &http.Server{
 		Addr:    n.Address,
@@ -404,4 +426,150 @@ func (n *Node) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(status)
+}
+
+// --- Ricart-Agrawala Mutual Exclusion ---
+
+func (n *Node) handleCleanupStart(w http.ResponseWriter, r *http.Request) {
+	n.mu.Lock()
+	if n.MutexState != Released {
+		n.mu.Unlock()
+		http.Error(w, "Already in critical section or requesting", http.StatusConflict)
+		return
+	}
+
+	n.MutexState = Wanted
+	n.MutexTimestamp = n.Clock.Increment()
+	n.MutexReplies = 0
+	n.MutexDeferred = make([]string, 0)
+	peers := n.Peers
+	// Check peer count
+	requiredReplies := len(peers)
+	n.mu.Unlock()
+
+	fmt.Printf("[Mutex] Starting Request. Timestamp: %d. Peers: %d\n", n.MutexTimestamp, requiredReplies)
+
+	if requiredReplies == 0 {
+		n.enterCriticalSection()
+		w.Write([]byte("Entered critical section immediately (no peers)"))
+		return
+	}
+
+	// Broadcast REQUEST
+	for _, peer := range peers {
+		go n.sendMutexRequest(peer)
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte("Requesting access check logs."))
+}
+
+func (n *Node) sendMutexRequest(peer string) {
+	n.mu.Lock()
+	ts := n.MutexTimestamp
+	myID := n.ID
+	myAddr := n.Address
+	n.mu.Unlock()
+
+	url := fmt.Sprintf("http://%s/mutex/request?ts=%d&id=%s&addr=%s", peer, ts, myID, myAddr)
+	http.Post(url, "application/json", nil)
+}
+
+func (n *Node) handleMutexRequest(w http.ResponseWriter, r *http.Request) {
+	tsStr := r.URL.Query().Get("ts")
+	reqID := r.URL.Query().Get("id")
+	reqAddr := r.URL.Query().Get("addr")
+	var reqTs int64
+	fmt.Sscanf(tsStr, "%d", &reqTs)
+
+	n.Clock.Update(reqTs)
+
+	n.mu.Lock()
+	deferRequest := false
+
+	if n.MutexState == Held {
+		deferRequest = true
+	} else if n.MutexState == Wanted {
+		// Tie-breaking: if my TS is lower (older), I win. If equal, strictly order by ID.
+		if n.MutexTimestamp < reqTs || (n.MutexTimestamp == reqTs && n.ID < reqID) {
+			deferRequest = true
+		}
+	}
+
+	if deferRequest {
+		fmt.Printf("[Mutex] Deferring request from %s (MyTS: %d, ReqTS: %d)\n", reqID, n.MutexTimestamp, reqTs)
+		n.MutexDeferred = append(n.MutexDeferred, reqAddr)
+		n.mu.Unlock()
+	} else {
+		n.mu.Unlock()
+		fmt.Printf("[Mutex] Granting permission to %s\n", reqID)
+		go n.sendMutexReply(reqAddr)
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (n *Node) sendMutexReply(peerAddr string) {
+	url := fmt.Sprintf("http://%s/mutex/reply?from=%s", peerAddr, n.ID)
+	http.Post(url, "application/json", nil)
+}
+
+func (n *Node) handleMutexReply(w http.ResponseWriter, r *http.Request) {
+	n.mu.Lock()
+	n.MutexReplies++
+	replies := n.MutexReplies
+	required := len(n.Peers)
+	state := n.MutexState
+	n.mu.Unlock()
+
+	fmt.Printf("[Mutex] Received reply. Total: %d/%d\n", replies, required)
+
+	if state == Wanted && replies >= required {
+		n.enterCriticalSection()
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (n *Node) enterCriticalSection() {
+	n.mu.Lock()
+	n.MutexState = Held
+	n.mu.Unlock()
+
+	fmt.Println("!!! ENTERING CRITICAL SECTION !!!")
+	fmt.Println(" performing system-wide consistency check...")
+
+	// Simulate work
+	go func() {
+		time.Sleep(5 * time.Second)
+
+		// Add Audit Record to Chain
+		op := models.Operation{
+			Type:      "AUDIT_LOG",
+			Data:      "Consistency Check Passed",
+			Timestamp: time.Now().Unix(),
+			NodeID:    n.ID,
+		}
+
+		n.mu.Lock()
+		n.Chain.AddBlock([]models.Operation{op})
+		n.mu.Unlock()
+		fmt.Println(" Audit log added.")
+
+		n.exitCriticalSection()
+	}()
+}
+
+func (n *Node) exitCriticalSection() {
+	fmt.Println("!!! EXITING CRITICAL SECTION !!!")
+
+	n.mu.Lock()
+	n.MutexState = Released
+	deferred := n.MutexDeferred
+	n.MutexDeferred = make([]string, 0)
+	n.mu.Unlock()
+
+	for _, addr := range deferred {
+		fmt.Printf("[Mutex] Sending deferred reply to %s\n", addr)
+		go n.sendMutexReply(addr)
+	}
 }
