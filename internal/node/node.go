@@ -206,11 +206,17 @@ func (n *Node) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		chunkLocs[i] = append(chunkLocs[i], n.ID)
 
-		// Replicate to others (Round Robin or Random)
-		// For demo: replicate to ALL peers
-		for _, peer := range n.Peers {
-			go n.replicateChunk(peer, fileID, i, chunkData)
-			chunkLocs[i] = append(chunkLocs[i], peer)
+		// Sharding V1: Round-Robin Distribution
+		// Instead of replicating to ALL peers, we distribute chunks across peers.
+		if len(n.Peers) > 0 {
+			peerIndex := i % len(n.Peers)
+			targetPeer := n.Peers[peerIndex]
+
+			// Replicate to the selected shard/peer
+			go n.replicateChunk(targetPeer, fileID, i, chunkData)
+			chunkLocs[i] = append(chunkLocs[i], targetPeer)
+
+			fmt.Printf(" [Sharding] Chunk %d assigned to %s\n", i, targetPeer)
 		}
 	}
 
