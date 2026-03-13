@@ -521,6 +521,7 @@ func (n *Node) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", meta.Name))
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.Size))
 
 	// 2. Retrieve chunks
 	for i := 0; i < meta.Chunks; i++ {
@@ -553,9 +554,10 @@ func (n *Node) handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (n *Node) fetchChunkFromPeers(fileID string, index int, peers []string) ([]byte, error) {
+	client := http.Client{Timeout: 5 * time.Second}
 	for _, peer := range peers {
 		url := fmt.Sprintf("http://%s/chunk?id=%s&index=%d", peer, fileID, index)
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			defer resp.Body.Close()
 			return ioutil.ReadAll(resp.Body)
