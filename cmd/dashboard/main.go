@@ -39,6 +39,7 @@ func main() {
 
 	http.HandleFunc("/", handleDashboard)
 	http.HandleFunc("/upload", handleProxyUpload)
+	http.HandleFunc("/backup/all", handleTriggerAllBackups)
 
 	fmt.Printf("Dashboard running at http://localhost%s\n", *port)
 	if err := http.ListenAndServe(*port, nil); err != nil {
@@ -202,4 +203,54 @@ func handleProxyUpload(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, _ := ioutil.ReadAll(resp.Body)
 	w.Header().Set("Content-Type", "text/html")
 	fmt.Fprintf(w, "<h1>Upload Result</h1><pre>%s</pre><a href='/'>Back</a>", string(bodyBytes))
+}
+
+func handleTriggerAllBackups(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	results := []string{}
+	// Use longer timeout for backup trigger as it might involve consensus wait
+	client := http.Client{Timeout: 5 * time.Second}
+
+	// Trigger on ALL nodes concurrently
+	type result struct {
+		addr string
+		msg  string
+	}
+	resChan := make(chan result, len(nodesAddr))
+
+	for _, addr := range nodesAddr {
+		go func(a string) {
+			resp, err := client.Get("http://" + a + "/backup/start")
+			if err != nil {
+				resChan <- result{a, fmt.Sprintf("Failed: %v", err)}
+				return
+			}
+			defer resp.Body.Close()
+			body, _ := ioutil.ReadAll(resp.Body)
+
+			statusMsg := "Success"
+			if resp.StatusCode != 200 {
+				statusMsg = fmt.Sprintf("Error (HTTP %d)", resp.StatusCode)
+			}
+			resChan <- result{a, fmt.Sprintf("%s: %s", statusMsg, string(body))}
+		}(addr)
+	}
+
+	for range nodesAddr {
+		res := <-resChan
+		results = append(results, fmt.Sprintf("Node %s -> %s", res.addr, res.msg))
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, "<h1>Global Backup Trigger Results</h1>")
+	fmt.Fprintf(w, "<p>Initiated backup request on all %d nodes.</p>", len(nodesAddr))
+	fmt.Fprintf(w, "<ul>")
+	for _, res := range results {
+		fmt.Fprintf(w, "<li>%s</li>", res)
+	}
+	fmt.Fprintf(w, "</ul><br><a href='/'>Back to Dashboard</a>")
 }

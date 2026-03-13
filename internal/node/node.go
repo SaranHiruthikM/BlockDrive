@@ -104,8 +104,43 @@ func (n *Node) Start() {
 		}
 	}()
 
+	// Initial Sync: Fetch ledger from peers if we are behind
+	go n.syncLedger()
+
 	// Start election/heartbeat loop
 	go n.runElectionLoop()
+}
+
+// Initial Ledger Synchronization
+func (n *Node) syncLedger() {
+	time.Sleep(3 * time.Second) // Wait for other peers to be available
+
+	n.mu.Lock()
+	peers := n.Peers
+	n.mu.Unlock()
+
+	for _, peer := range peers {
+		resp, err := http.Get("http://" + peer + "/ledger")
+		if err != nil {
+			fmt.Printf(" [Sync] Failed to contact %s: %v\n", peer, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		var newChain []models.Block
+		if err := json.NewDecoder(resp.Body).Decode(&newChain); err != nil {
+			fmt.Printf(" [Sync] Failed to decode ledger from %s: %v\n", peer, err)
+			continue
+		}
+
+		n.mu.Lock()
+		if len(newChain) > len(n.Chain.Blocks) {
+			fmt.Printf(" [Sync] Updating local chain (Height: %d) from peer %s (Height: %d)\n", len(n.Chain.Blocks), peer, len(newChain))
+			n.Chain.Blocks = newChain
+			n.Chain.Save()
+		}
+		n.mu.Unlock()
+	}
 }
 
 // Loop to manage leader election and heartbeats
@@ -184,23 +219,23 @@ func (n *Node) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Encrypt (Simple XOR for demo)
-	encrypted := simpleEncrypt(fileBytes, "secret_key")
-
 	// Split into chunks (e.g., 1MB each)
 	// For demo with small files, let's say 1KB chunks
 	const chunkSize = 1024
-	numChunks := (len(encrypted) + chunkSize - 1) / chunkSize
+	numChunks := (len(fileBytes) + chunkSize - 1) / chunkSize
 
-	chunkLocs := make(map[int][]string)
+	chunkLocs := make(map[string][]string)
 
 	for i := 0; i < numChunks; i++ {
 		start := i * chunkSize
 		end := start + chunkSize
-		if end > len(encrypted) {
-			end = len(encrypted)
+		if end > len(fileBytes) {
+			end = len(fileBytes)
 		}
-		chunkData := encrypted[start:end]
+
+		// Fix: Encrypt EACH chunk independently so they can be decrypted independently
+		chunkDataRaw := fileBytes[start:end]
+		chunkData := simpleEncrypt(chunkDataRaw, "secret_key")
 
 		// Save locally first (primary replica)
 		err := n.Store.SaveChunk(fileID, i, chunkData)
@@ -209,7 +244,8 @@ func (n *Node) handleUpload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		// Use Address instead of ID so other nodes know how to reach us directly
-		chunkLocs[i] = append(chunkLocs[i], n.Address)
+		idxStr := fmt.Sprintf("%d", i)
+		chunkLocs[idxStr] = append(chunkLocs[idxStr], n.Address)
 
 		// Sharding V1: Round-Robin Distribution
 		// Instead of replicating to ALL peers, we distribute chunks across peers.
@@ -219,7 +255,7 @@ func (n *Node) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			// Replicate to the selected shard/peer
 			go n.replicateChunk(targetPeer, fileID, i, chunkData)
-			chunkLocs[i] = append(chunkLocs[i], targetPeer)
+			chunkLocs[idxStr] = append(chunkLocs[idxStr], targetPeer)
 
 			fmt.Printf(" [Sharding] Chunk %d assigned to %s\n", i, targetPeer)
 		}
@@ -238,7 +274,9 @@ func (n *Node) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Or better: forward op to owner/leader.
 
 	if n.State == Leader {
-		n.Chain.AddBlock([]models.Operation{op})
+		newBlock := n.Chain.AddBlock([]models.Operation{op})
+		// CRITICAL FIX: Leader MUST broadcast the new block to all followers!
+		go n.broadcastBlock(newBlock)
 		// Broadcast new block to peers?
 		// Note: Real system uses consensus here (Raft/Paxos). To keep it simple:
 		// Leader appends, then periodic sync or broadcast.
@@ -497,10 +535,8 @@ func (n *Node) handleDownload(w http.ResponseWriter, r *http.Request) {
 		if chunkData == nil {
 			// Smart Retrieval: Use the blockchain metadata to find EXACTLY who has the chunk
 			// This works even if the uploader is offline or not a direct peer!
-			potentialSources := meta.Locations[i]
-
-			// Fallback: Add our direct peers just in case
-			potentialSources = append(potentialSources, n.Peers...)
+			idxStr := fmt.Sprintf("%d", i)
+			potentialSources := meta.Locations[idxStr]
 
 			chunkData, err = n.fetchChunkFromPeers(fileID, i, potentialSources)
 		}

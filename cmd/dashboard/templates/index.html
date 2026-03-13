@@ -85,6 +85,18 @@
                 <button type="submit" class="btn">Upload to Cluster</button>
             </form>
         </div>
+
+        <!-- Admin Actions (Demo) -->
+        <div class="card">
+            <h2>Cluster Demo</h2>
+            <p>Simulate concurrent backup requests to test Mutual Exclusion.</p>
+            <form action="/backup/all" method="POST">
+                <button type="submit" class="btn" style="background-color: #d63384; width: 100%; font-weight: bold;">
+                    ⚠️ TRIGGER CLUSTER-WIDE BACKUP
+                </button>
+            </form>
+            <p><small>This will send backup requests to ALL nodes simultaneously.</small></p>
+        </div>
     </div>
 
     <!-- Blockchain Audit Log -->

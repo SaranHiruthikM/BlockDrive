@@ -36,13 +36,13 @@ type Node struct {
 
 // FileMetadata stores file information
 type FileMetadata struct {
-	ID        string           `json:"id"`
-	Name      string           `json:"name"`
-	Size      int64            `json:"size"`
-	Owner     string           `json:"owner"`
-	Chunks    int              `json:"chunks"`
-	Locations map[int][]string `json:"locations"` // Map chunk index to node IDs
-	Timestamp int64            `json:"timestamp"`
+	ID        string              `json:"id"`
+	Name      string              `json:"name"`
+	Size      int64               `json:"size"`
+	Owner     string              `json:"owner"`
+	Chunks    int                 `json:"chunks"`
+	Locations map[string][]string `json:"locations"` // Map chunk index (as string) to node IDs
+	Timestamp int64               `json:"timestamp"`
 }
 
 // Block represents a block in the blockchain
