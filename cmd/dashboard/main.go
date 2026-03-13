@@ -29,6 +29,9 @@ func main() {
 	flag.Parse()
 
 	nodesAddr = strings.Split(*nodesList, ",")
+	for i := range nodesAddr {
+		nodesAddr[i] = strings.TrimSpace(nodesAddr[i])
+	}
 	var err error
 
 	// Parse template from embedded filesystem
